@@ -2,7 +2,7 @@ mod ast;
 mod lexer;
 use std::{env, fs};
 
-use crate::ast::TokenStream;
+use crate::ast::Parser;
 use crate::lexer::Cursor;
 
 fn main() {
@@ -17,6 +17,7 @@ fn main() {
     for token in &tokens {
         println!("{:?}", token)
     }
-    let ast = TokenStream::new(tokens).build();
-    println!("{:?}", ast);
+    let ast = Parser::new(tokens).build();
+    println!("AST:");
+    println!("{:#?}", ast);
 }
