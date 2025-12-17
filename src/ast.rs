@@ -1,4 +1,6 @@
-use crate::lexer::{Token, TokenKind};
+use crate::error::{ParseError, ParseErrorKind};
+use crate::lexer::{LiteralKind as LexerLiteralKind, Token, TokenKind};
+use crate::span::Span;
 
 #[derive(Debug)]
 pub struct Ast {
@@ -8,23 +10,62 @@ pub struct Ast {
 #[derive(Debug)]
 enum AstNode {
     Fn(Box<FnDef>),
-    Expr {},
-}
-
-#[derive(Debug, Clone)]
-pub enum ParseError {
-    UnexpectedToken { expected: TokenKind, found: Token },
-    UnexpectedEof,
-    ExpectedIdent(Token),
 }
 
 #[derive(Debug)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum ExprKind {
+    Literal(LiteralKind),
+    Variable(String),
+    BinaryOp {
+        left: Box<Expr>,
+        op: BinaryOperator,
+        right: Box<Expr>,
+    },
     CallExpr(CallExpr),
     MethodExpr,
     ArgList,
     Arg,
     TrailingBlock,
+    Unkown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BinaryOperator {
+    Add,      // +
+    Subtract, // -
+    Multiply, // *  (TODO: add to lexer)
+    Divide,   // /  (TODO: add to lexer)
+    Gt,       // >
+    Lt,       // <  (TODO: add to lexer)
+    Gte,      // >= (TODO: add to lexer)
+    Lte,      // <= (TODO: add to lexer)
+    Eq,       // == (TODO: add to lexer)
+    Neq,      // != (TODO: add to lexer)
+}
+
+impl BinaryOperator {
+    fn precedence(&self) -> u8 {
+        match self {
+            BinaryOperator::Multiply | BinaryOperator::Divide => 5,
+            BinaryOperator::Add | BinaryOperator::Subtract => 4,
+            BinaryOperator::Gt | BinaryOperator::Lt | BinaryOperator::Gte | BinaryOperator::Lte => {
+                3
+            }
+            BinaryOperator::Eq | BinaryOperator::Neq => 2,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum LiteralKind {
+    Int(i32),
+    Bool(bool),
 }
 
 #[derive(Debug)]
@@ -46,6 +87,7 @@ pub enum Type {
 pub struct Parameter {
     ident: String,
     ty: Option<Type>,
+    span: Span,
 }
 
 #[derive(Debug)]
@@ -63,6 +105,7 @@ pub enum BlockItem {
 #[derive(Debug)]
 pub struct Block {
     nodes: Vec<BlockItem>,
+    span: Span,
 }
 
 #[derive(Debug)]
@@ -70,6 +113,7 @@ pub struct FnDef {
     name: String,
     sign: FnSignature,
     body: Block,
+    span: Span,
 }
 
 #[derive(Debug)]
@@ -89,7 +133,8 @@ impl Parser {
     pub fn build(&mut self) -> Result<Ast, ParseError> {
         let mut nodes = Vec::new();
 
-        while let Some(token) = self.peek() {
+        while self.peek().is_some() {
+            let token = self.peek().unwrap();
             let ast_node = match &token.kind {
                 TokenKind::Ident { sym } => self.ident(sym.clone())?,
                 _ => {
@@ -100,19 +145,33 @@ impl Parser {
             nodes.push(ast_node);
         }
 
-        Ok(Ast { nodes: nodes })
+        Ok(Ast { nodes })
     }
 
     fn ident(&mut self, sym: String) -> Result<AstNode, ParseError> {
         let symbol = sym.as_str();
-        let node = match symbol {
-            "fn" => self.function_def()?,
-            _ => AstNode::Expr {},
-        };
-        Ok(node)
+        match symbol {
+            "fn" => self.function_def(),
+            _ => {
+                let token = self.peek().ok_or_else(|| {
+                    ParseError::new(ParseErrorKind::UnexpectedEof, self.last_token_span())
+                })?;
+                Err(ParseError::unexpected_token(
+                    TokenKind::Ident {
+                        sym: "fn".to_string(),
+                    },
+                    token.clone(),
+                ))
+            }
+        }
     }
 
     fn function_def(&mut self) -> Result<AstNode, ParseError> {
+        let start_token = self.peek().ok_or_else(|| {
+            ParseError::new(ParseErrorKind::UnexpectedEof, self.last_token_span())
+        })?;
+        let start_span = start_token.span;
+
         self.expect(TokenKind::Ident {
             sym: "fn".to_string(),
         })?;
@@ -124,18 +183,28 @@ impl Parser {
 
         self.expect(TokenKind::OpenBrace)?;
         let body = self.block()?;
+        let body_end = body.span.end;
 
-        Ok(AstNode::Fn(Box::new(FnDef { name, sign, body })))
+        Ok(AstNode::Fn(Box::new(FnDef {
+            name,
+            sign,
+            body,
+            span: Span {
+                start: start_span.start,
+                end: body_end,
+            },
+        })))
     }
 
     fn block(&mut self) -> Result<Block, ParseError> {
+        let start_token = self.peek().ok_or_else(|| {
+            ParseError::new(ParseErrorKind::UnexpectedEof, self.last_token_span())
+        })?;
+        let start_span = start_token.span;
+
         let mut nodes = Vec::new();
 
-        while let Some(token) = self.peek() {
-            if token.kind == TokenKind::CloseBrace {
-                break;
-            }
-
+        while self.peek().is_some() && self.peek().unwrap().kind != TokenKind::CloseBrace {
             let expr = self.parse_expr()?;
 
             if let Some(next) = self.peek() {
@@ -150,66 +219,128 @@ impl Parser {
             }
         }
 
-        Ok(Block { nodes })
+        let end_span = if let Some(token) = self.peek() {
+            token.span
+        } else {
+            self.last_token_span()
+        };
+        Ok(Block {
+            nodes,
+            span: Span {
+                start: start_span.start,
+                end: end_span.end,
+            },
+        })
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        if let Some(token) = self.peek() {
-            match &token.kind {
-                TokenKind::Ident { sym } if sym == "return" => {
-                    self.eat();
-                    while let Some(t) = self.peek() {
-                        if t.kind == TokenKind::Semi || t.kind == TokenKind::CloseBrace {
-                            break;
-                        }
-                        self.eat();
-                    }
-                    Ok(Expr::ArgList)
-                }
-                TokenKind::Ident { sym } if sym == "let" => {
-                    self.eat();
-                    while let Some(t) = self.peek() {
-                        if t.kind == TokenKind::Semi {
-                            break;
-                        }
-                        self.eat();
-                    }
-                    Ok(Expr::ArgList)
-                }
-                TokenKind::Ident { sym } => {
-                    self.eat();
-                    Ok(Expr::CallExpr(CallExpr {
-                        arglist: Box::new(Expr::ArgList),
-                    }))
-                }
-                _ => {
-                    self.eat();
-                    Ok(Expr::ArgList)
-                }
-            }
-        } else {
-            Err(ParseError::UnexpectedEof)
+        self.parse_expr_with_precedence(0)
+    }
+
+    fn parse_expr_with_precedence(&mut self, min_precedence: u8) -> Result<Expr, ParseError> {
+        let mut left = self.parse_primary_expr()?;
+
+        loop {
+            let op = match self.peek() {
+                Some(token) => match self.token_to_binary_op(&token.kind) {
+                    Some(op) if op.precedence() >= min_precedence => op,
+                    _ => break,
+                },
+                None => break,
+            };
+
+            self.eat();
+
+            let right = self.parse_expr_with_precedence(op.precedence() + 1)?;
+
+            let start = left.span.start;
+            let end = right.span.end;
+            left = Expr {
+                kind: ExprKind::BinaryOp {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                },
+                span: Span { start, end },
+            };
         }
+
+        Ok(left)
+    }
+
+    fn token_to_binary_op(&self, token: &TokenKind) -> Option<BinaryOperator> {
+        match token {
+            TokenKind::Plus => Some(BinaryOperator::Add),
+            TokenKind::Minus => Some(BinaryOperator::Subtract),
+            TokenKind::Gt => Some(BinaryOperator::Gt),
+            _ => None,
+        }
+    }
+
+    fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
+        let start_token = self.peek().ok_or_else(|| {
+            ParseError::new(ParseErrorKind::UnexpectedEof, self.last_token_span())
+        })?;
+        let start_span = start_token.span;
+        let token_kind = start_token.kind.clone();
+
+        let kind = match &token_kind {
+            TokenKind::Literal { kind } => match kind {
+                LexerLiteralKind::Int(val) => {
+                    let val = val.clone();
+                    self.eat();
+                    let number: i32 = val.parse().unwrap();
+                    ExprKind::Literal(LiteralKind::Int(number))
+                }
+            },
+            TokenKind::OpenParen => {
+                self.eat(); // consume '('
+                let inner = self.parse_expr()?;
+                self.expect(TokenKind::CloseParen)?; // expect ')'
+                return Ok(inner);
+            }
+            TokenKind::Ident { sym } if sym == "return" => {
+                self.eat();
+                self.eat_until_one_of(&[TokenKind::Semi, TokenKind::CloseBrace]);
+                ExprKind::Unkown
+            }
+            TokenKind::Ident { sym } if sym == "let" => {
+                self.eat();
+                self.eat_until_one_of(&[TokenKind::Semi]);
+                ExprKind::Unkown
+            }
+            TokenKind::Ident { sym } => {
+                let name = sym.clone();
+                self.eat();
+                ExprKind::Variable(name)
+            }
+            _ => {
+                self.eat();
+                ExprKind::Unkown
+            }
+        };
+
+        let end = self.last_token_span().end;
+        Ok(Expr {
+            kind,
+            span: Span {
+                start: start_span.start,
+                end,
+            },
+        })
     }
 
     fn fn_signature(&mut self) -> Result<FnSignature, ParseError> {
         let mut params = Vec::new();
 
-        while let Some(token) = self.peek() {
-            if token.kind == TokenKind::CloseParen {
-                break;
-            }
-
+        while self.peek().is_some() && self.peek().unwrap().kind != TokenKind::CloseParen {
             params.push(self.param()?);
 
             if let Some(next) = self.peek() {
                 if next.kind == TokenKind::Comma {
                     self.eat();
                 } else if next.kind != TokenKind::CloseParen {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: TokenKind::Comma,
-                        found: next.clone(),
-                    });
+                    return Err(ParseError::unexpected_token(TokenKind::Comma, next.clone()));
                 }
             }
         }
@@ -232,12 +363,20 @@ impl Parser {
     }
 
     fn param(&mut self) -> Result<Parameter, ParseError> {
+        let ident_token = self.peek().ok_or_else(|| {
+            ParseError::new(ParseErrorKind::UnexpectedEof, self.last_token_span())
+        })?;
+        let start = ident_token.span.start;
+
         let ident = self.expect_any_ident()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type()?;
+        let end = self.last_token_span().end;
+
         Ok(Parameter {
             ident,
             ty: Some(ty),
+            span: Span { start, end },
         })
     }
 
@@ -265,23 +404,73 @@ impl Parser {
         Some(token)
     }
 
+    fn last_token_span(&self) -> Span {
+        if self.pos > 0 {
+            self.tokens[self.pos - 1].span
+        } else {
+            Span { start: 0, end: 0 }
+        }
+    }
+
     fn expect_any_ident(&mut self) -> Result<String, ParseError> {
-        let next_token = self.eat().ok_or(ParseError::UnexpectedEof)?;
+        let eof_span = self.last_token_span();
+        let next_token = self
+            .eat()
+            .ok_or_else(|| ParseError::new(ParseErrorKind::UnexpectedEof, eof_span))?;
         match &next_token.kind {
             TokenKind::Ident { sym } => Ok(sym.clone()),
-            _ => Err(ParseError::ExpectedIdent(next_token.clone())),
+            _ => Err(ParseError::new(
+                ParseErrorKind::ExpectedIdent(next_token.clone()),
+                next_token.span,
+            )),
         }
     }
 
     fn expect(&mut self, expected: TokenKind) -> Result<Token, ParseError> {
-        let next_token = self.eat().ok_or(ParseError::UnexpectedEof)?;
+        let eof_span = self.last_token_span();
+        let next_token = self
+            .eat()
+            .ok_or_else(|| ParseError::new(ParseErrorKind::UnexpectedEof, eof_span))?;
         if next_token.kind == expected {
             Ok(next_token.clone())
         } else {
-            Err(ParseError::UnexpectedToken {
-                expected,
-                found: next_token.clone(),
-            })
+            Err(ParseError::unexpected_token(expected, next_token.clone()))
+        }
+    }
+
+    /// Consume tokens while the predicate function returns true
+    fn eat_while<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&Token) -> bool,
+    {
+        while let Some(token) = self.peek() {
+            if !predicate(token) {
+                break;
+            }
+            self.eat();
+        }
+    }
+
+    /// Consume tokens until the predicate is true (or EOF)
+    fn eat_until<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&Token) -> bool,
+    {
+        while let Some(token) = self.peek() {
+            if predicate(token) {
+                break;
+            }
+            self.eat();
+        }
+    }
+
+    /// Consume tokens until we hit one of the specified token kinds
+    fn eat_until_one_of(&mut self, kinds: &[TokenKind]) {
+        while let Some(token) = self.peek() {
+            if kinds.iter().any(|k| &token.kind == k) {
+                break;
+            }
+            self.eat();
         }
     }
 }

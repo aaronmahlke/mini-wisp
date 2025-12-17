@@ -1,3 +1,5 @@
+use crate::span::Span;
+use std::fmt;
 use std::str::Chars;
 
 const SPACE_CHAR: char = ' ';
@@ -21,6 +23,30 @@ pub enum TokenKind {
     Eof,
 }
 
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenKind::Ident { sym } => write!(f, "identifier '{}'", sym),
+            TokenKind::OpenParen => write!(f, "'('"),
+            TokenKind::CloseParen => write!(f, "')'"),
+            TokenKind::OpenBrace => write!(f, "'{{'"),
+            TokenKind::CloseBrace => write!(f, "'}}'"),
+            TokenKind::Literal { kind } => match kind {
+                LiteralKind::Int(val) => write!(f, "integer literal '{}'", val),
+            },
+            TokenKind::Eq => write!(f, "'='"),
+            TokenKind::Semi => write!(f, "';'"),
+            TokenKind::Colon => write!(f, "':'"),
+            TokenKind::Minus => write!(f, "'-'"),
+            TokenKind::Plus => write!(f, "'+'"),
+            TokenKind::Comma => write!(f, "','"),
+            TokenKind::Gt => write!(f, "'>'"),
+            TokenKind::Unknown => write!(f, "unknown token"),
+            TokenKind::Eof => write!(f, "end of file"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralKind {
     Int(String),
@@ -29,23 +55,30 @@ pub enum LiteralKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
+    pub span: Span,
 }
 
 pub struct Cursor<'a> {
     chars: Chars<'a>,
+    pos: usize,
 }
 
 impl<'a> Cursor<'a> {
     pub fn new(src: &'a str) -> Self {
-        Cursor { chars: src.chars() }
+        Cursor {
+            chars: src.chars(),
+            pos: 0,
+        }
     }
 
-    fn advance(&mut self) -> TokenKind {
+    fn advance(&mut self) -> (TokenKind, usize) {
+        let start = self.pos;
+
         let Some(c) = self.peek() else {
-            return TokenKind::Eof;
+            return (TokenKind::Eof, 0);
         };
 
-        match c {
+        let toke_kind = match c {
             c if is_ident_start(c) => self.ident(),
             '0'..='9' => self.number(),
             '(' => self.bump_and_return(TokenKind::OpenParen),
@@ -60,7 +93,10 @@ impl<'a> Cursor<'a> {
             '>' => self.bump_and_return(TokenKind::Gt),
             ',' => self.bump_and_return(TokenKind::Comma),
             _ => self.bump_and_return(TokenKind::Unknown),
-        }
+        };
+
+        let token_length = self.pos - start;
+        (toke_kind, token_length)
     }
 
     fn bump_and_return(&mut self, kind: TokenKind) -> TokenKind {
@@ -69,8 +105,9 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn bump(&mut self) -> Option<char> {
-        let mut c = self.chars.next();
-        if c.is_some() { c.take() } else { None }
+        let c = self.chars.next()?;
+        self.pos += c.len_utf8();
+        Some(c)
     }
 
     pub fn ident(&mut self) -> TokenKind {
@@ -92,7 +129,7 @@ impl<'a> Cursor<'a> {
                 break;
             };
             result.push(c);
-            self.chars.next();
+            self.bump();
         }
         result
     }
@@ -106,8 +143,16 @@ impl<'a> Cursor<'a> {
 
         while !self.is_eof() {
             self.skip_whitespace();
-            let token_kind = self.advance();
-            tokens.push(Token { kind: token_kind })
+            let start = self.pos;
+            let (token_kind, len) = self.advance();
+
+            tokens.push(Token {
+                kind: token_kind,
+                span: Span {
+                    start,
+                    end: start + len,
+                },
+            });
         }
         tokens
     }
@@ -122,7 +167,7 @@ impl<'a> Cursor<'a> {
                 break;
             };
             if is_whitespace(c) {
-                self.chars.next();
+                self.bump();
             } else {
                 break;
             }

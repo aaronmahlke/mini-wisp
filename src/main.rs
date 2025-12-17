@@ -1,5 +1,7 @@
 mod ast;
+mod error;
 mod lexer;
+mod span;
 use std::{env, fs};
 
 use crate::ast::Parser;
@@ -10,14 +12,22 @@ fn main() {
     let src = &args[1];
 
     println!("Source: {}", src);
-    let file_content = fs::read_to_string(src).expect("file not found");
-    println!("Content: {}", file_content);
+    let source = fs::read_to_string(src).expect("file not found");
+    println!("Content: {}", source);
 
-    let tokens = Cursor::new(&file_content).tokenize();
-    for token in &tokens {
-        println!("{:?}", token)
-    }
-    let ast = Parser::new(tokens).build();
-    println!("AST:");
-    println!("{:#?}", ast);
+    let tokens = Cursor::new(&source).tokenize();
+    // for token in &tokens {
+    //     println!("{:?}", token)
+    // }
+
+    let mut parser = Parser::new(tokens);
+
+    match parser.build() {
+        Ok(ast) => {
+            println!("{:#?}", ast);
+        }
+        Err(error) => {
+            eprintln!("{}", error.format(&source))
+        }
+    };
 }
